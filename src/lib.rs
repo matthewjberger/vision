@@ -1,4 +1,3 @@
-use egui::Modifiers;
 use std::sync::Arc;
 use winit::{
     application::ApplicationHandler,
@@ -207,9 +206,6 @@ impl ApplicationHandler for App {
 
                 let gui_input = gui_state.take_egui_input(window);
                 gui_state.egui_ctx().begin_pass(gui_input);
-
-                #[cfg(not(target_arch = "wasm32"))]
-                let title = "Rust/Wgpu";
 
                 #[cfg(feature = "webgpu")]
                 let title = "Rust/Wgpu/Webgpu";
