@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalSize,
@@ -246,6 +249,7 @@ impl ApplicationHandler for App {
                     .show(gui_state.egui_ctx(), |ui| {
                         if let Some(tile_tree) = self.tile_tree.as_mut() {
                             tile_tree.ui(&mut self.tile_tree_context, ui);
+                            self.tile_tree_context.end_frame();
                         }
                     });
 
@@ -266,13 +270,13 @@ impl ApplicationHandler for App {
                     }
                 };
 
-                if let Some(selected_viewport) = self.tile_tree_context.selected_viewport {
+                for viewport in self.tile_tree_context.viewports.iter() {
                     renderer.render_frame(
-                        screen_descriptor,
-                        paint_jobs,
-                        textures_delta,
+                        &screen_descriptor,
+                        paint_jobs.clone(),
+                        textures_delta.clone(),
                         delta_time,
-                        &selected_viewport,
+                        viewport,
                     );
                 }
             }
@@ -326,7 +330,7 @@ impl Renderer {
 
     pub fn render_frame(
         &mut self,
-        screen_descriptor: egui_wgpu::ScreenDescriptor,
+        screen_descriptor: &egui_wgpu::ScreenDescriptor,
         paint_jobs: Vec<egui::epaint::ClippedPrimitive>,
         textures_delta: egui::TexturesDelta,
         delta_time: crate::Duration,
@@ -335,7 +339,7 @@ impl Renderer {
         let delta_time = delta_time.as_secs_f32();
 
         self.scene
-            .update(&self.gpu.queue, self.gpu.aspect_ratio(), delta_time);
+            .update(&self.gpu.queue, viewport.aspect_ratio(), delta_time);
 
         for (id, image_delta) in &textures_delta.set {
             self.egui_renderer
@@ -358,7 +362,7 @@ impl Renderer {
             &self.gpu.queue,
             &mut encoder,
             &paint_jobs,
-            &screen_descriptor,
+            screen_descriptor,
         );
 
         let surface_texture = self
@@ -428,7 +432,7 @@ impl Renderer {
             self.egui_renderer.render(
                 &mut render_pass.forget_lifetime(),
                 &paint_jobs,
-                &screen_descriptor,
+                screen_descriptor,
             );
         }
 
@@ -839,7 +843,45 @@ struct Pane {
 
 #[derive(Default)]
 struct TreeBehavior {
-    selected_viewport: Option<egui::Rect>,
+    viewports: Vec<egui::Rect>,
+    visible_tiles: HashSet<egui_tiles::TileId>,
+    tile_rects: HashMap<egui_tiles::TileId, egui::Rect>,
+}
+
+impl TreeBehavior {
+    fn end_frame(&mut self) {
+        // Sort tiles by z-index (which in egui_tiles is effectively the order they were drawn)
+        let mut tiles: Vec<_> = self.tile_rects.iter().collect();
+        tiles.sort_by_key(|(id, _)| id.0);
+
+        self.visible_tiles.clear();
+
+        // Check each tile against tiles that were drawn after it
+        for i in 0..tiles.len() {
+            let (current_id, current_rect) = tiles[i];
+
+            let mut is_visible = current_rect.width() > 0.0 && current_rect.height() > 0.0;
+
+            // Check if this tile is completely covered by any later tile
+            for tile in tiles.iter().skip(i + 1) {
+                let (_, later_rect) = tile;
+                if later_rect.contains_rect(*current_rect) {
+                    is_visible = false;
+                    break;
+                }
+            }
+
+            if is_visible {
+                self.visible_tiles.insert(*current_id);
+            }
+        }
+
+        // Print visible tiles at the end of each frame
+        println!("Visible tiles: {:?}", self.visible_tiles);
+
+        // Clear the rects for next frame
+        self.tile_rects.clear();
+    }
 }
 
 impl egui_tiles::Behavior<Pane> for TreeBehavior {
@@ -850,19 +892,31 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior {
     fn pane_ui(
         &mut self,
         ui: &mut egui::Ui,
-        _tile_id: egui_tiles::TileId,
+        tile_id: egui_tiles::TileId,
         pane: &mut Pane,
     ) -> egui_tiles::UiResponse {
+        let rect = ui.max_rect();
+
+        // Store this tile's rect for overlap checking
+        self.tile_rects.insert(tile_id, rect);
+
         if pane.nr == 2 {
-            self.selected_viewport = Some(ui.max_rect());
+            self.viewports = vec![rect];
         } else {
             let color = egui::epaint::Hsva::new(0.103 * pane.nr as f32, 0.5, 0.5, 1.0);
-            ui.painter().rect_filled(ui.max_rect(), 0.0, color);
-
-            if ui.button("Click Me").clicked() {
-                println!("Button clicked in Pane {}", pane.nr);
-            }
+            ui.painter().rect_filled(rect, 0.0, color);
         }
+
+        // Display tile ID in the center of each pane
+        ui.centered_and_justified(|ui| {
+            ui.label(format!("Tile {}", tile_id.0));
+        });
+
+        if ui.button("Click Me").clicked() {
+            println!("Button clicked in Pane {}", pane.nr);
+        }
+
+        egui_tiles::UiResponse::None
         // let dragged = ui
         //     .allocate_rect(ui.max_rect(), egui::Sense::click_and_drag())
         //     .on_hover_cursor(egui::CursorIcon::Grab)
@@ -872,7 +926,6 @@ impl egui_tiles::Behavior<Pane> for TreeBehavior {
         // } else {
         //     egui_tiles::UiResponse::None
         // }
-        egui_tiles::UiResponse::None
     }
 }
 
